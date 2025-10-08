@@ -1,5 +1,5 @@
 services:
-  - type: worker
+  - type: web
     name: betfetcher-worker
     env: python
     plan: free
