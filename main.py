@@ -5,7 +5,6 @@ from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# === Загрузка переменных окружения ===
 load_dotenv()
 
 TOKEN = os.getenv("BOT_TOKEN")
@@ -26,13 +25,6 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🛑 Остановка фонового процесса не реализована.")
 
-# === Уведомление админа ===
-async def notify_admin(bot, message: str):
-    try:
-        await bot.send_message(chat_id=ADMIN_ID, text=message)
-    except Exception as e:
-        print(f"⚠️ Ошибка уведомления админа: {e}")
-
 # === Фоновая задача ===
 async def fetcher_loop(bot):
     while True:
@@ -41,23 +33,27 @@ async def fetcher_loop(bot):
             await bot.send_message(chat_id=ADMIN_ID, text="📊 Тестовый сигнал: бот работает!")
             await asyncio.sleep(UPDATE_INTERVAL)
         except Exception as e:
-            await notify_admin(bot, f"⚠️ Ошибка в fetcher_loop:\n{e}")
+            print(f"⚠️ Ошибка в fetcher_loop: {e}")
             await asyncio.sleep(10)
 
-# === Основной запуск ===
-async def main_async():
+# === Запуск ===
+async def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("stop", stop))
 
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+
     asyncio.create_task(fetcher_loop(app.bot))
 
     print("✅ Bot started. Listening for commands...")
-    await app.run_polling()
 
-# === Исправленный запуск под Render ===
+    # держим процесс живым
+    await asyncio.Event().wait()
+
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(main_async())
+    asyncio.run(main())
