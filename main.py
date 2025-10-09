@@ -1,37 +1,34 @@
-# main.py — адаптирован под Render (без .env)
+# main.py — Render-ready (без .env)
 import os
 import asyncio
 import signal
 import datetime
 import traceback
 from typing import Optional, Dict, Any
-
 import aiohttp
 from aiohttp import web
+from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # === Конфиг из окружения ===
 TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = os.getenv("ADMIN_ID")  # обязателен
-API_URL = os.getenv("API_URL", "").strip()
+ADMIN_ID = os.getenv("ADMIN_ID")
 UPDATE_INTERVAL = int(os.getenv("UPDATE_INTERVAL", "180"))
 HTTP_PORT = int(os.getenv("PORT", 10000))
 
 if not TOKEN:
-    raise SystemExit("❌ BOT_TOKEN не задан в Environment Variables.")
+    raise SystemExit("❌ BOT_TOKEN не задан.")
 if not ADMIN_ID:
-    raise SystemExit("❌ ADMIN_ID не задан в Environment Variables.")
+    raise SystemExit("❌ ADMIN_ID не задан.")
 ADMIN_ID = int(ADMIN_ID)
 
-
-# === Утилита логирования ===
+# === Логирование ===
 def log(msg: str):
     t = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{t} UTC] {msg}", flush=True)
 
-
-# === Класс для уведомлений админа ===
+# === Уведомления админу ===
 class Notifier:
     def __init__(self, bot):
         self.bot = bot
@@ -43,97 +40,104 @@ class Notifier:
         except Exception as e:
             log(f"Notifier error: {e}")
 
-
-# === Получение данных с внешнего API ===
-async def get_odds_from_api(session: aiohttp.ClientSession) -> Optional[list]:
-    if not API_URL:
-        return None
-    try:
-        async with session.get(API_URL, timeout=20) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
-            if isinstance(data, dict) and "data" in data:
-                return data["data"]
-            if isinstance(data, list):
-                return data
-            return None
-    except Exception as e:
-        log(f"API fetch error: {e}")
-        return None
-
-
+# === Хранилище отправленных сигналов ===
 tracked_signals: Dict[str, Dict[str, Any]] = {}
 
+# === Парсер Pari.ru ===
+async def fetch_live_events(session: aiohttp.ClientSession):
+    url = "https://pari.ru/live/"
+    try:
+        async with session.get(url, timeout=20) as resp:
+            html = await resp.text()
+            soup = BeautifulSoup(html, "html.parser")
+            events = []
 
+            # пример парсинга: ищем блоки матчей (адаптировать под структуру сайта)
+            for match_div in soup.select("div.live-event-row"):
+                try:
+                    teams = match_div.select_one("div.team-names").get_text(strip=True)
+                    odds_str = match_div.select_one("div.odds-value").get_text(strip=True)
+                    odds = float(odds_str.replace(",", "."))
+                    link = match_div.select_one("a.event-link")["href"]
+                    events.append({
+                        "teams": teams,
+                        "odds": odds,
+                        "link": f"https://pari.ru{link}"
+                    })
+                except Exception:
+                    continue
+            return events
+    except Exception as e:
+        log(f"Error fetching live events: {e}")
+        return []
+
+# === Простейший анализ статистики ===
+async def analyze_event(session: aiohttp.ClientSession, event):
+    # Здесь можно подключить парсер истории очных встреч
+    # Для примера: событие считается валидным, если odds 1.05–1.33
+    odds = event["odds"]
+    if 1.05 <= odds <= 1.33:
+        probability = 0.75  # пример оценки 75%
+        return probability
+    return 0.0
+
+# === Основной цикл обработки ===
 async def fetcher_loop(bot, notifier: Notifier, update_interval: int = 180):
     backoff = 5
-    while True:
-        try:
-            async with aiohttp.ClientSession() as session:
-                events = await get_odds_from_api(session)
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                events = await fetch_live_events(session)
                 if events:
                     for ev in events:
-                        event_id = ev.get("id") or ev.get("event_id") or (ev.get("name") or "") + "_" + str(ev.get("timestamp") or "")
+                        event_id = ev["teams"] + "_" + str(ev["odds"])
                         if event_id in tracked_signals:
-                            status = ev.get("status") or ev.get("result") or ev.get("finished")
-                            if status and not tracked_signals[event_id].get("settled"):
-                                settled_text = f"[SETTLED]\nEvent: {ev.get('teams') or ev.get('name')}\nResult: {status}\nOdds: {tracked_signals[event_id].get('odds')}"
-                                await notifier.notify(settled_text)
-                                tracked_signals[event_id]["settled"] = True
                             continue
-
-                        odds = None
-                        o = ev.get("odds") or ev.get("markets") or {}
-                        if isinstance(o, dict):
-                            for k in ("home", "P1", "1", "odds"):
-                                cand = o.get(k)
-                                if cand:
-                                    try:
-                                        odds = float(cand)
-                                        break
-                                    except:
-                                        pass
-
-                        if odds and 1.05 <= odds <= 1.33:
-                            sport = ev.get("sport") or ev.get("league") or "Unknown"
-                            teams = ev.get("teams") or ev.get("name") or "Event"
-                            where_to_bet = ev.get("bet_on") or "Home / 1"
-                            text = f"[SIGNAL]\nSport: {sport}\nEvent: {teams}\nOdds: {odds}\nPlace bet: {where_to_bet}\nEvent ID: {event_id}"
+                        prob = await analyze_event(session, ev)
+                        if prob >= 0.7:
+                            text = (
+                                f"[SIGNAL]\n"
+                                f"Event: {ev['teams']}\n"
+                                f"Odds: {ev['odds']}\n"
+                                f"Probability: {int(prob*100)}%\n"
+                                f"Link: {ev['link']}"
+                            )
                             await notifier.notify(text)
-                            tracked_signals[event_id] = {"odds": odds, "event": teams, "sport": sport, "sent_at": datetime.datetime.utcnow().isoformat(), "settled": False}
+                            tracked_signals[event_id] = {
+                                "sent_at": datetime.datetime.utcnow().isoformat(),
+                                "odds": ev["odds"],
+                                "teams": ev["teams"],
+                                "link": ev["link"]
+                            }
                 else:
                     now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-                    await notifier.notify(f"[heartbeat] {now} UTC — бот жив. Нет данных или API_URL не задан.")
-            backoff = 5
-            await asyncio.sleep(update_interval)
-        except Exception as e:
-            tb = traceback.format_exc()
-            log(f"Error in fetcher_loop: {e}\n{tb}")
-            try:
-                await notifier.notify(f"⚠️ Ошибка в fetcher_loop: {e}")
-            except Exception:
-                pass
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 300)
+                    await notifier.notify(f"[heartbeat] {now} UTC — бот жив. Нет данных.")
+                await asyncio.sleep(update_interval)
+            except Exception as e:
+                tb = traceback.format_exc()
+                log(f"Error in fetcher_loop: {e}\n{tb}")
+                try:
+                    await notifier.notify(f"⚠️ Ошибка в fetcher_loop: {e}")
+                except Exception:
+                    pass
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 300)
 
-
-# === Telegram-команды ===
+# === Telegram команды ===
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🤖 Бот запущен и работает.")
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     active = len(tracked_signals)
+    now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     await update.message.reply_text(f"✅ Бот активен. Отслеживаем сигналов: {active}\n{now} UTC")
-
 
 # === Инициализация Telegram ===
 application = Application.builder().token(TOKEN).build()
 application.add_handler(CommandHandler("start", cmd_start))
 application.add_handler(CommandHandler("status", cmd_status))
 
-
-# === Веб-сервер для Render ===
+# === Веб-сервер Render ===
 async def handle_root(request):
     return web.Response(text="✅ Bot is running on Render!")
 
@@ -152,7 +156,6 @@ async def stop_web_server(runner_container):
     if runner:
         await runner.cleanup()
         log("🌐 Web server stopped")
-
 
 # === Основная функция ===
 async def main():
@@ -190,7 +193,6 @@ async def main():
     await application.shutdown()
     await stop_web_server(runner_container)
     log("✅ Graceful shutdown complete.")
-
 
 if __name__ == "__main__":
     try:
