@@ -2,14 +2,16 @@ services:
   - type: web
     name: betfetcher-bot
     env: python
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
     envVars:
       - key: BOT_TOKEN
-        value: "placeholder"
+        sync: false
       - key: ADMIN_ID
-        value: "placeholder"
+        sync: false
       - key: UPDATE_INTERVAL
         value: "180"
       - key: API_URL
         value: ""
+
