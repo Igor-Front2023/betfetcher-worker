@@ -1,4 +1,4 @@
-# main.py — полностью самодостаточный для деплоя на Render (web service)
+# main.py — адаптирован под Render (без .env)
 import os
 import asyncio
 import signal
@@ -6,35 +6,32 @@ import datetime
 import traceback
 from typing import Optional, Dict, Any
 
-from dotenv import load_dotenv
 import aiohttp
 from aiohttp import web
-
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-load_dotenv()
-
 # === Конфиг из окружения ===
 TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = os.getenv("ADMIN_ID")
+ADMIN_ID = os.getenv("ADMIN_ID")  # обязателен
 API_URL = os.getenv("API_URL", "").strip()
 UPDATE_INTERVAL = int(os.getenv("UPDATE_INTERVAL", "180"))
 HTTP_PORT = int(os.getenv("PORT", 10000))
-RENDER_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
 
 if not TOKEN:
-    raise SystemExit("BOT_TOKEN не задан в переменных окружения.")
+    raise SystemExit("❌ BOT_TOKEN не задан в Environment Variables.")
 if not ADMIN_ID:
-    raise SystemExit("ADMIN_ID не задан в переменных окружения.")
+    raise SystemExit("❌ ADMIN_ID не задан в Environment Variables.")
 ADMIN_ID = int(ADMIN_ID)
 
-# === Утилита логов ===
+
+# === Утилита логирования ===
 def log(msg: str):
     t = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{t} UTC] {msg}", flush=True)
 
-# === Notifier ===
+
+# === Класс для уведомлений админа ===
 class Notifier:
     def __init__(self, bot):
         self.bot = bot
@@ -46,7 +43,8 @@ class Notifier:
         except Exception as e:
             log(f"Notifier error: {e}")
 
-# === Fetcher API ===
+
+# === Получение данных с внешнего API ===
 async def get_odds_from_api(session: aiohttp.ClientSession) -> Optional[list]:
     if not API_URL:
         return None
@@ -63,8 +61,9 @@ async def get_odds_from_api(session: aiohttp.ClientSession) -> Optional[list]:
         log(f"API fetch error: {e}")
         return None
 
-# === Трекер сигналов ===
+
 tracked_signals: Dict[str, Dict[str, Any]] = {}
+
 
 async def fetcher_loop(bot, notifier: Notifier, update_interval: int = 180):
     backoff = 5
@@ -78,7 +77,7 @@ async def fetcher_loop(bot, notifier: Notifier, update_interval: int = 180):
                         if event_id in tracked_signals:
                             status = ev.get("status") or ev.get("result") or ev.get("finished")
                             if status and not tracked_signals[event_id].get("settled"):
-                                settled_text = f"[SETTLED]\nEvent: {ev.get('teams') or ev.get('name')}\nResult: {status}\nOdds: {tracked_signals[event_id].get('odds')}\n"
+                                settled_text = f"[SETTLED]\nEvent: {ev.get('teams') or ev.get('name')}\nResult: {status}\nOdds: {tracked_signals[event_id].get('odds')}"
                                 await notifier.notify(settled_text)
                                 tracked_signals[event_id]["settled"] = True
                             continue
@@ -93,90 +92,74 @@ async def fetcher_loop(bot, notifier: Notifier, update_interval: int = 180):
                                         odds = float(cand)
                                         break
                                     except:
-                                        if isinstance(cand, dict):
-                                            for kk in ("price", "value"):
-                                                if kk in cand:
-                                                    try:
-                                                        odds = float(cand[kk])
-                                                        break
-                                                    except:
-                                                        pass
-                                        elif isinstance(cand, list) and len(cand) > 0:
-                                            try:
-                                                odds = float(cand[0])
-                                            except:
-                                                pass
+                                        pass
+
                         if odds and 1.05 <= odds <= 1.33:
-                            sport = ev.get("sport") or ev.get("league") or ev.get("category") or "Unknown"
-                            teams = ev.get("teams") or ev.get("name") or ev.get("title") or "Event"
+                            sport = ev.get("sport") or ev.get("league") or "Unknown"
+                            teams = ev.get("teams") or ev.get("name") or "Event"
                             where_to_bet = ev.get("bet_on") or "Home / 1"
-                            text = (
-                                f"[SIGNAL]\nSport: {sport}\nEvent: {teams}\nOdds: {odds}\nPlace bet: {where_to_bet}\n"
-                                f"Event ID: {event_id}\n(Detected by external API)"
-                            )
+                            text = f"[SIGNAL]\nSport: {sport}\nEvent: {teams}\nOdds: {odds}\nPlace bet: {where_to_bet}\nEvent ID: {event_id}"
                             await notifier.notify(text)
-                            tracked_signals[event_id] = {
-                                "odds": odds,
-                                "event": teams,
-                                "sport": sport,
-                                "sent_at": datetime.datetime.utcnow().isoformat(),
-                                "settled": False
-                            }
+                            tracked_signals[event_id] = {"odds": odds, "event": teams, "sport": sport, "sent_at": datetime.datetime.utcnow().isoformat(), "settled": False}
                 else:
                     now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-                    await notifier.notify(f"[heartbeat] {now} UTC — бот жив. Нет событий или не указан API_URL.")
+                    await notifier.notify(f"[heartbeat] {now} UTC — бот жив. Нет данных или API_URL не задан.")
             backoff = 5
             await asyncio.sleep(update_interval)
         except Exception as e:
             tb = traceback.format_exc()
             log(f"Error in fetcher_loop: {e}\n{tb}")
             try:
-                await notifier.notify(f"⚠️ Error in fetcher_loop: {e}")
+                await notifier.notify(f"⚠️ Ошибка в fetcher_loop: {e}")
             except Exception:
                 pass
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 300)
 
-# === Telegram Handlers ===
+
+# === Telegram-команды ===
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Бот работает. Я пришлю сигналы и статус.")
+    await update.message.reply_text("🤖 Бот запущен и работает.")
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     active = len(tracked_signals)
-    await update.message.reply_text(f"Бот активен. Отслеживаем сигналов: {active}. {now} UTC")
+    await update.message.reply_text(f"✅ Бот активен. Отслеживаем сигналов: {active}\n{now} UTC")
 
-# === Telegram App ===
+
+# === Инициализация Telegram ===
 application = Application.builder().token(TOKEN).build()
 application.add_handler(CommandHandler("start", cmd_start))
 application.add_handler(CommandHandler("status", cmd_status))
 
-# === Webhook / HTTP server ===
+
+# === Веб-сервер для Render ===
 async def handle_root(request):
-    return web.Response(text="Bot is running!")
+    return web.Response(text="✅ Bot is running on Render!")
 
-async def start_webhook(app, notifier):
-    webhook_url = f"https://{RENDER_HOSTNAME}/{TOKEN}"
-    await app.bot.set_webhook(webhook_url)
-    log(f"📡 Webhook set to {webhook_url}")
-
+async def start_web_server(runner_container):
     web_app = web.Application()
-    web_app.router.add_post(f"/{TOKEN}", app.webhook_handler())
     web_app.router.add_get("/", handle_root)
-
     runner = web.AppRunner(web_app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", HTTP_PORT)
     await site.start()
-    log(f"✅ Web server started on port {HTTP_PORT}")
+    runner_container["runner"] = runner
+    log(f"🌐 Web server started on port {HTTP_PORT}")
 
-    return runner
+async def stop_web_server(runner_container):
+    runner = runner_container.get("runner")
+    if runner:
+        await runner.cleanup()
+        log("🌐 Web server stopped")
 
+
+# === Основная функция ===
 async def main():
     notifier = Notifier(application.bot)
-    runner = None
-
+    runner_container = {}
     stop_event = asyncio.Event()
+
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -184,40 +167,30 @@ async def main():
         except NotImplementedError:
             pass
 
-    log("🚀 Initializing Telegram Application...")
+    log("🚀 Initializing bot...")
     await application.initialize()
     await application.start()
-    log("🤖 Telegram application started")
+    await application.updater.start_polling()
+    log("✅ Telegram polling started")
 
-    # Стартуем webhook
-    runner = await start_webhook(application, notifier)
-
-    # Запуск fetcher_loop
+    web_task = asyncio.create_task(start_web_server(runner_container))
     fetcher_task = asyncio.create_task(fetcher_loop(application.bot, notifier, update_interval=UPDATE_INTERVAL))
 
     try:
-        await notifier.notify("✅ Бот успешно запущен через Webhook (Render Web Service).")
+        await notifier.notify("✅ Бот успешно запущен на Render (без .env).")
     except Exception:
         pass
 
-    log("✅ Все процессы запущены.")
     await stop_event.wait()
+    log("🛑 Stopping bot...")
 
-    log("🔻 Shutdown signal received.")
     fetcher_task.cancel()
-    try:
-        await fetcher_task
-    except asyncio.CancelledError:
-        pass
-
+    await application.updater.stop()
     await application.stop()
     await application.shutdown()
-
-    if runner:
-        await runner.cleanup()
-        log("✅ Web server stopped")
-
+    await stop_web_server(runner_container)
     log("✅ Graceful shutdown complete.")
+
 
 if __name__ == "__main__":
     try:
