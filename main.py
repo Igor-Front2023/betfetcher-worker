@@ -1,59 +1,44 @@
 import os
 import asyncio
-import datetime
+from aiohttp import web
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 load_dotenv()
 
 TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-UPDATE_INTERVAL = int(os.getenv("UPDATE_INTERVAL", "180"))
+CHAT_ID = os.getenv("CHAT_ID")
 
-if not TOKEN or not ADMIN_ID:
-    raise SystemExit("❌ Укажи BOT_TOKEN и ADMIN_ID в переменных окружения Render!")
-
-# === Команды ===
+# --- Команды телеграм-бота ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ Бот ставок запущен и работает!")
+    await update.message.reply_text("Бот успешно запущен на Render 🚀")
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    await update.message.reply_text(f"📡 Бот активен.\nПоследняя проверка: {now}")
+# --- Telegram App ---
+app = Application.builder().token(TOKEN).build()
+app.add_handler(CommandHandler("start", start))
 
-async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🛑 Остановка фонового процесса не реализована.")
+# --- HTTP сервер (Render требует порт) ---
+async def handle(request):
+    return web.Response(text="Bot is running!")
 
-# === Фоновая задача ===
-async def fetcher_loop(bot):
-    while True:
-        try:
-            print("🔄 Проверка линии ставок...")
-            await bot.send_message(chat_id=ADMIN_ID, text="📊 Тестовый сигнал: бот работает!")
-            await asyncio.sleep(UPDATE_INTERVAL)
-        except Exception as e:
-            print(f"⚠️ Ошибка в fetcher_loop: {e}")
-            await asyncio.sleep(10)
+async def run_web_server():
+    port = int(os.getenv("PORT", 10000))
+    web_app = web.Application()
+    web_app.router.add_get("/", handle)
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"✅ Web server running on port {port}")
 
-# === Запуск ===
+# --- Главный запуск ---
 async def main():
-    app = ApplicationBuilder().token(TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("stop", stop))
-
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling()
-
-    asyncio.create_task(fetcher_loop(app.bot))
-
-    print("✅ Bot started. Listening for commands...")
-
-    # держим процесс живым
-    await asyncio.Event().wait()
+    print("🚀 Starting bot...")
+    await asyncio.gather(
+        app.run_polling(),
+        run_web_server()
+    )
 
 if __name__ == "__main__":
     asyncio.run(main())
