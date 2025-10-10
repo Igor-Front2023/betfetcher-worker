@@ -1,76 +1,45 @@
-import requests
-from bs4 import BeautifulSoup
-from datetime import datetime
+import aiohttp
+import asyncio
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)"}
+URL = "https://line-lb01-w.pb06e2-resources.com/events/list?lang=ru&scopeMarket=2300"
 
+async def fetch_data():
+    async with aiohttp.ClientSession() as session:
+        async with session.get(URL, headers={"User-Agent": "Mozilla/5.0"}) as resp:
+            return await resp.json()
 
-def fetch_from_api():
-    """Пробуем получить live события из открытых API"""
-    api_urls = [
-        "https://api.pari.ru/api/v1/events/live",
-        "https://api.flashscore.com/x/feed/d_live_1_",
-    ]
-    for url in api_urls:
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=10)
-            if r.ok and "application/json" in r.headers.get("Content-Type", ""):
-                data = r.json()
-                return parse_json_data(data)
-        except Exception as e:
-            print(f"[API fail] {url}: {e}")
-    return []
+async def main():
+    data = await fetch_data()
+    all_events = data.get("events", [])
+    live_infos = data.get("liveEventInfos", [])
 
+    # Индексируем события по ID для быстрого доступа
+    events_map = {e["id"]: e for e in all_events}
 
-def parse_json_data(data):
-    """Парсим JSON (пример для Pari)"""
-    events = []
-    if not data:
-        return events
+    live_events = []
+    for info in live_infos:
+        event_id = info.get("eventId")
+        base = events_map.get(event_id)
+        if base:
+            sport_id = base.get("sportId")
+            team1 = base.get("team1")
+            team2 = base.get("team2")
+            live_events.append({
+                "id": event_id,
+                "sportId": sport_id,
+                "team1": team1,
+                "team2": team2,
+                "timer": info.get("timer"),
+                "score": info.get("scoreComment"),
+            })
 
-    if isinstance(data, dict) and "events" in data:
-        for e in data["events"]:
-            try:
-                sport = e.get("sport", {}).get("name", "unknown")
-                teams = f"{e['competitors'][0]['name']} vs {e['competitors'][1]['name']}"
-                odds = [o["value"] for o in e.get("markets", [])[0].get("outcomes", [])]
-                events.append({
-                    "sport": sport,
-                    "teams": teams,
-                    "odds": odds,
-                })
-            except Exception:
-                continue
-    return events
+    print(f"📺 Найдено live событий: {len(live_events)}")
+    for ev in live_events[:10]:  # покажем первые 10
+        print(f"{ev['team1']} vs {ev['team2']} | {ev['score']} | ⏱ {ev['timer']}")
+
+if __name__ == "__main__":
+    asyncio.run(main())
 
 
-def fetch_from_html():
-    """Если API недоступен — парсим HTML"""
-    urls = ["https://www.flashscorekz.com/", "https://pari.ru/live"]
-    events = []
-    for url in urls:
-        try:
-            html = requests.get(url, headers=HEADERS, timeout=10).text
-            soup = BeautifulSoup(html, "html.parser")
-            matches = soup.select(".event__match")
-            for m in matches[:10]:
-                teams = " ".join([t.get_text(strip=True) for t in m.select(".event__participant")])
-                odds = [o.get_text(strip=True) for o in m.select(".event__odd")]
-                if teams and odds:
-                    events.append({
-                        "sport": "unknown",
-                        "teams": teams,
-                        "odds": odds,
-                    })
-        except Exception as e:
-            print(f"[HTML fail] {url}: {e}")
-    return events
 
 
-def get_live_events():
-    """Универсальная функция"""
-    events = fetch_from_api()
-    if not events:
-        events = fetch_from_html()
-    print(f"[{datetime.utcnow()}] Найдено событий: {len(events)}")
-    return events
