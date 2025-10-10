@@ -1,84 +1,142 @@
-# stats_fetcher_playwright.py
 import asyncio
-from playwright.async_api import async_playwright
+import re
+import json
+import traceback
 from bs4 import BeautifulSoup
+
+try:
+    from playwright.async_api import async_playwright
+except ImportError:
+    async_playwright = None
+
+import requests
+
+DEBUG = True
 
 
 async def fetch_h2h(url: str, team1: str = None, team2: str = None, limit: int = 5):
-    """
-    Получает статистику очных встреч (H2H) с сайта Flashscore.
-    Использует Playwright для рендеринга динамического контента.
-    Возвращает список матчей в формате:
-    [
-        {"date": "...", "score": "2:0", "winner": "Team1"},
-        ...
-    ]
-    """
-    print(f"🌐 Загружаем H2H страницу: {url}")
+    print(f"🌐 fetch_h2h: {url} (team1={team1}, team2={team2})")
 
-    matches = []
+    # Попробуем сначала API Flashscore
+    api_result = await fetch_h2h_via_api(url, team1, team2, limit)
+    if api_result:
+        print("✅ Найдено через API Flashscore")
+        return api_result
+
+    # Если API не сработал — используем Playwright
+    if async_playwright:
+        try:
+            async with async_playwright() as p:
+                print("🚀 Launching Chromium...")
+                browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
+                page = await browser.new_page()
+
+                await page.goto(url, timeout=60000)
+                print("✅ Страница загружена")
+
+                # Кликаем по H2H, если нужно
+                try:
+                    await page.click("a:has-text('H2H')")
+                    print("🟢 Открыта вкладка H2H")
+                    await asyncio.sleep(3)
+                except Exception:
+                    pass
+
+                await asyncio.sleep(3)
+                html = await page.content()
+                soup = BeautifulSoup(html, "html.parser")
+
+                matches = extract_matches_from_html(soup, team1, team2, limit)
+
+                if not matches:
+                    print("⚠️ Данных в DOM нет, пробуем fallback")
+                    scripts = soup.find_all("script")
+                    for s in scripts:
+                        if "h2h" in s.text.lower():
+                            snippet = re.findall(r"[A-Z][^<>]{10,80}", s.text)
+                            matches = [{"text": snip, "winner": "?"} for snip in snippet[:limit]]
+                            break
+
+                await browser.close()
+                return matches
+
+        except Exception as e:
+            print(f"⚠️ Ошибка Playwright: {e}")
+            traceback.print_exc()
+
+    # Если ничего не вышло — fallback requests
+    print("🔁 Используем requests fallback...")
     try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page()
-            await page.goto(url, timeout=60000)
-            await page.wait_for_selector("div.h2h__table", timeout=25000)
-
-            html = await page.content()
-            await browser.close()
-
-        soup = BeautifulSoup(html, "html.parser")
-
-        # Ищем все ряды матчей
-        match_blocks = soup.select("div.h2h__table div.h2h__row") or soup.select("div.h2h__table div")
-
-        for row in match_blocks[:limit]:
-            text = row.get_text(" ", strip=True)
-
-            # Ищем дату и счёт
-            date = ""
-            score = ""
-            parts = text.split()
-            for part in parts:
-                if ":" in part and len(part) <= 5:  # 2:0, 1:1, 3:2
-                    score = part
-                if "-" in part and len(part.split("-")) == 3:  # дата формата 2025-10-01
-                    date = part
-
-            # Определяем победителя по счёту
-            winner = "Draw"
-            try:
-                if ":" in score:
-                    left, right = score.split(":")
-                    left, right = int(left), int(right)
-                    if left > right:
-                        winner = team1 or "Team1"
-                    elif right > left:
-                        winner = team2 or "Team2"
-            except Exception:
-                pass
-
-            matches.append({
-                "date": date,
-                "score": score,
-                "winner": winner,
-                "text": text
-            })
-
-        print(f"✅ Найдено {len(matches)} очных матчей")
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, headers=headers, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        matches = extract_matches_from_html(soup, team1, team2, limit)
+        print(f"✅ Найдено {len(matches)} матчей через requests fallback")
         return matches
+    except Exception as e:
+        print(f"❌ Ошибка requests fallback: {e}")
+        traceback.print_exc()
+        return []
+
+
+async def fetch_h2h_via_api(url, team1, team2, limit):
+    """Извлекает H2H напрямую из API Flashscore."""
+    try:
+        match_id = re.search(r"match/([^/]+)/", url)
+        if not match_id:
+            return []
+        match_id = match_id.group(1)
+
+        api_url = f"https://d.flashscore.com/x/feed/h2h_{match_id}_1_en_1"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(api_url, headers=headers, timeout=15)
+
+        if r.status_code != 200 or not r.text.strip():
+            return []
+
+        # Flashscore возвращает JSONP → чистим
+        data_raw = r.text.strip()
+        data_clean = re.sub(r"^[^(]+\(|\);?$", "", data_raw)
+        data = json.loads(data_clean)
+
+        results = []
+        for item in data.get("events", [])[:limit]:
+            text = f"{item.get('T1', {}).get('Nm')} vs {item.get('T2', {}).get('Nm')} | {item.get('Sc', {}).get('FS')}"
+            winner = "Draw"
+            if team1 and team1.lower() in text.lower():
+                winner = team1
+            elif team2 and team2.lower() in text.lower():
+                winner = team2
+            results.append({"text": text, "winner": winner})
+
+        return results
 
     except Exception as e:
-        print(f"⚠️ Ошибка при загрузке H2H данных: {e}")
-        return matches
+        if DEBUG:
+            print(f"⚠️ Ошибка API Flashscore: {e}")
+        return []
 
 
-# Пример теста
+def extract_matches_from_html(soup, team1, team2, limit):
+    matches = []
+    for table in soup.select("div.h2h__table, table.h2h"):
+        rows = table.select("div.h2h__row, tr")
+        for row in rows[:limit]:
+            text = " ".join(row.stripped_strings)
+            if not text:
+                continue
+            winner = "Draw"
+            if team1 and team1.lower() in text.lower():
+                winner = team1
+            elif team2 and team2.lower() in text.lower():
+                winner = team2
+            matches.append({"text": text, "winner": winner})
+    return matches
+
+
 if __name__ == "__main__":
-    async def main():
-        url = "https://www.flashscorekz.com/match/tennis/back-dayeon-WWkxyOw9/reyngold-ekaterina-lpjDUxQf/h2h/all-surfaces/?mid=xzFatGtA"
-        data = await fetch_h2h(url, team1="Back Dayeon", team2="Reyngold Ekaterina")
-        for m in data:
-            print(m)
-
-    asyncio.run(main())
+    test_url = "https://www.flashscore.com/match/tennis/back-dayeon-WWkxyOw9/reyngold-ekaterina-lpjDUxQf/h2h/all-surfaces/?mid=xzFatGtA"
+    result = asyncio.run(fetch_h2h(test_url, "Back Dayeon", "Reyngold Ekaterina"))
+    print("\n📊 Итоговый результат:")
+    for r in result:
+        print(" -", r)
