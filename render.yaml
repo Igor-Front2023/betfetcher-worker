@@ -3,10 +3,14 @@ services:
     name: betfetcher
     env: python
     plan: free
+    pythonVersion: 3.11  # важная версия для совместимости greenlet
     buildCommand: |
+      pip install --upgrade pip
       pip install -r requirements.txt
-      playwright install --with-deps
+      pip install playwright
+      playwright install
     startCommand: python main.py
+
     envVars:
       - key: BOT_TOKEN
         sync: false
