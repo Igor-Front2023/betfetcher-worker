@@ -3,3 +3,6 @@ aiohttp==3.9.5
 beautifulsoup4==4.12.2
 playwright==1.40.0
 httpx==0.27.0
+greenlet>=2.0.2,<3.0.0
+python-telegram-bot==20.7
+# добавь остальные зависимости твоего проекта здесь
