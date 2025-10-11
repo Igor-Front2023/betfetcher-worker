@@ -1,22 +1,18 @@
 services:
   - type: web
-    name: betfetcher-bot
+    name: betfetcher
     env: python
     plan: free
-    region: frankfurt  # можно заменить на nearest (Render сам выберет)
-    runtime: python3
-    buildCommand: pip install -r requirements.txt
+    buildCommand: |
+      pip install -r requirements.txt
+      playwright install --with-deps
     startCommand: python main.py
-
     envVars:
       - key: BOT_TOKEN
-        sync: false       # 🔒 Вводишь вручную в Render Dashboard
-      - key: ADMIN_ID
-        sync: false       # 🔒 Тоже вводишь вручную
-      - key: API_URL
-        sync: false       # 🔒 Вводишь вручную или оставляешь пустым
+        sync: false
+      - key: ADMIN_CHAT_ID
+        sync: false
       - key: UPDATE_INTERVAL
-        value: "180"      # Интервал проверки API в секундах (3 мин)
-      - key: PORT
-        value: "10000"    # Render сам передает порт через переменную, но укажем запасной
-
+        value: "180"
+      - key: ENABLE_POLLING
+        value: "0"
